@@ -6,3 +6,5 @@ Using
 1 x Potentiometer
 1 x LCD 16x2
 1 x Fingerprint Sensor AS608
+1 x Arduino UNO
+1 x Keypad
