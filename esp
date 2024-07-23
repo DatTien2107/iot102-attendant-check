@@ -1,0 +1,352 @@
+#include <LiquidCrystal_I2C.h>
+// pin #2 is IN from sensor
+// pin #3 is OUT from arduino
+#include <Adafruit_Fingerprint.h>
+#include <SoftwareSerial.h>
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <Firebase_ESP_Client.h>
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+
+//FIREBASE
+#define WIFI_SSID "FPTU_Library"
+#define WIFI_PASSWORD "12345678"
+#define API_KEY "AIzaSyDDPDcXEOJZhXLrc36nBto-LAe6HRYe8kE"
+#define DATABASE_URL "https://iot123-c3f2e-default-rtdb.firebaseio.com/"  //<databaseName>.firebaseio.com or <databaseName>.<region>.firebasedatabase.app
+#define USER_EMAIL "admin@gmail.com"
+#define USER_PASSWORD "123321"
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+unsigned long sendDataPrevMillis = 0;
+unsigned long count = 0;
+
+//FINGER PRINT SENSOR
+SoftwareSerial mySerial(0, 2);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+uint8_t id;
+String inputString = "";
+int checkTask = 1;
+
+//LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+//ARDUINO
+SoftwareSerial arduinoSerial(14, 12);
+
+
+void setup() {
+  Serial.begin(9600);
+  arduinoSerial.begin(9600);
+  //WIFI CONNECT
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  //FIREBASE CONNECT
+  Serial.printf("Firebase Client v%s\n\n", FIREBASE_CLIENT_VERSION);
+  config.api_key = API_KEY;
+  auth.user.email = USER_EMAIL;
+  auth.user.password = USER_PASSWORD;
+  config.database_url = DATABASE_URL;
+  config.token_status_callback = tokenStatusCallback;
+  fbdo.setBSSLBufferSize(4096, 1024);
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectNetwork(true);
+
+  //LCD CONNECT
+  lcd.init();
+  lcd.backlight();
+  delay(2000);
+
+  //FINGERPRINT CONNECT
+  Serial.println("Fingerprint connect");
+  finger.begin(57600);
+  if (finger.verifyPassword()) {
+    Serial.println("Found fingerprint sensor!");
+  } else {
+    Serial.println("Did not find fingerprint sensor :(");
+    while (1) { delay(1); }
+  }
+}
+
+void loop()  // run over and over again
+{
+
+
+  String keypadKey = arduinoSerial.readString();
+  if (keypadKey == "A") {
+    addMember();
+  } else if (keypadKey == "B") {
+    deleteMember();
+  } else {
+    checkAttendance();
+  }
+
+
+
+
+
+  delay(100);
+}
+
+void checkAttendance() {
+  uint8_t p = finger.getImage();
+  switch (p) {
+    case FINGERPRINT_OK:
+      break;
+    case FINGERPRINT_NOFINGER:
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Diem danh");
+      return;
+    default:
+      return;
+  }
+  p = finger.image2Tz();
+  p = finger.fingerSearch();
+  if (p == FINGERPRINT_OK) {
+    updateUser(String(finger.fingerID), "Đã điểm danh");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Thanh cong");
+  } else if (p == FINGERPRINT_NOTFOUND) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Thu lai");
+  }
+  delay(1000);
+}
+
+void addMember() {
+  while (true) {
+    String data = readKeypadInput("Nhap ID");
+    id = data.toInt();
+    if (id == 0 || getUser(String(id)) != 0) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Khong hop le");
+    } else {
+      while (!getFingerprintEnroll()) {
+      }
+      break;
+    }
+  }
+}
+
+void deleteMember() {
+  while (true) {
+    String data = readKeypadInput("Nhap ID");
+    id = data.toInt();
+    if (id == 0 || getUser(String(id)) == 0) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Khong hop le");
+    } else {
+      deleteFingerprint(id);
+      break;
+    }
+  }
+}
+int updateUser(String user, String value) {
+  if (Firebase.RTDB.setString(&fbdo, "user/" + user, value)) {
+    return 1;
+  } else {
+    Serial.println("FAILED");
+    Serial.println("REASON: " + fbdo.errorReason());
+    return 0;
+  }
+}
+
+int getUser(String user) {
+  if (Firebase.RTDB.getString(&fbdo, "user/" + user)) {
+    return 1;
+  } else {
+    Serial.println("FAILED");
+    Serial.println("REASON: " + fbdo.errorReason());
+    return 0;
+  }
+}
+
+String readKeypadInput(String title) {
+  String input = "";
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(title);
+  while (true) {
+    String key = arduinoSerial.readString();
+    if (key != "") {
+      if (key == "#") {
+        break;
+      }
+      input = input + key;
+      if (key == "*") {
+        input = "";
+      }
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(title);
+      lcd.setCursor(0, 1);
+      lcd.print(input);
+    }
+    delay(200);
+  }
+  return input;
+}
+
+void serialEvent() {
+  while (Serial.available()) {
+    // get the new byte:
+    char inChar = (char)Serial.read();
+    // add it to the inputString:
+    inputString += inChar;
+    // if the incoming character is a 'X', set a flag so the main loop can
+    // do something about it:
+    if (inChar == 'X') {
+      if (inputString[0] == 'C' && inputString[4] == 'X')  //to check ID
+      {
+        id = (inputString[1] - 48) * 100 + (inputString[2] - 48) * 10 + (inputString[3] - 48);
+        checkTask = 2;
+        Serial.print("Check ID...");
+        Serial.println(id);
+      } else if (inputString == "ADDX")  //add new fingerprint
+      {
+        Serial.println("Add fingerprint...");
+        checkTask = 1;
+      } else if (inputString[0] == 'D' && inputString[4] == 'X')  //delete fingerprint in memmory
+      {
+        id = (inputString[1] - 48) * 100 + (inputString[2] - 48) * 10 + (inputString[3] - 48);
+        Serial.print("Delete template ID...");
+        Serial.println(id);
+        checkTask = 3;
+      }
+    }
+  }
+  inputString = "";
+}
+
+uint8_t readnumber(void) {
+  uint8_t num = 0;
+  while (num == 0) {
+    while (!Serial.available())
+      ;
+    num = Serial.parseInt();
+  }
+  return num;
+}
+
+
+uint8_t getFingerprintEnroll() {
+  int p = -1;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Dau van tay");
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    switch (p) {
+      case FINGERPRINT_OK:
+        break;
+      case FINGERPRINT_NOFINGER:
+        Serial.println(".");
+        break;
+      default:
+        Serial.println("Unknown error");
+        break;
+    }
+  }
+
+  // OK success!
+  p = finger.image2Tz(1);
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image converted");
+      break;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Bo tay");
+  delay(2000);
+
+  p = 0;
+  while (p != FINGERPRINT_NOFINGER) {
+    p = finger.getImage();
+  }
+
+  p = -1;
+  Serial.println("Place same finger again");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Xac nhan");
+  lcd.setCursor(0, 1);
+  lcd.print("Dau van tay");
+
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image taken");
+        break;
+      case FINGERPRINT_NOFINGER:
+        Serial.print(".");
+        break;
+    }
+  }
+
+  // OK success!
+  p = finger.image2Tz(2);
+  p = finger.createModel();
+
+  if (p == FINGERPRINT_OK) {
+  } else if (p == FINGERPRINT_ENROLLMISMATCH) {
+    Serial.println("Fingerprints did not match");
+    lcd.setCursor(0, 0);
+    lcd.print("Van tay");
+    lcd.setCursor(0, 1);
+    lcd.print("Khong khop");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    return p;
+  }
+
+  p = finger.storeModel(id);
+  if (p == FINGERPRINT_OK) {
+    updateUser(String(id), "Chưa điểm danh");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Luu van tay");
+    lcd.setCursor(0, 1);
+    lcd.print("thanh cong");
+    delay(5000);
+  } else {
+    Serial.println("Unknown error");
+    return p;
+  }
+  return true;
+}
+
+
+
+uint8_t deleteFingerprint(uint8_t id) {
+  uint8_t p = -1;
+  p = finger.deleteModel(id);
+  if (p == FINGERPRINT_OK) {
+    updateUser(String(id), "Đã xóa");
+  } else {
+    Serial.print("Unknown error: 0x");
+    Serial.println(p, HEX);
+  }
+  return p;
+}
